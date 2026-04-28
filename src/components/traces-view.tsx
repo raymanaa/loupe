@@ -7,10 +7,11 @@ import {
   Clock,
   Copy,
   DollarSign,
+  Play,
   X,
   Zap,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { SpanKindBadge, spanKindBg, spanKindColor } from "@/components/span-kind-badge";
 import {
   formatCost,
@@ -24,21 +25,150 @@ import {
 } from "@/lib/mock-data";
 
 export function TracesView({ projectId }: { projectId: ProjectId }) {
-  const traces = useMemo(() => tracesForProject(projectId), [projectId]);
+  const baseTraces = useMemo(() => tracesForProject(projectId), [projectId]);
+  const [liveTraces, setLiveTraces] = useState<Trace[]>([]);
+  const [runningTraceId, setRunningTraceId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
+  const demoTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+
+  const traces = useMemo(
+    () => [...liveTraces, ...baseTraces],
+    [liveTraces, baseTraces],
+  );
 
   const selected = useMemo(
     () => traces.find((t) => t.id === selectedId) ?? null,
     [traces, selectedId],
   );
 
+  const runDemo = useCallback(() => {
+    // Clear any pending timers from previous demo
+    demoTimers.current.forEach(clearTimeout);
+    demoTimers.current = [];
+
+    const tid = `t-demo-${Math.random().toString(36).slice(2, 8)}`;
+    const SCRIPT: Array<Omit<Span, "traceId" | "status"> & {
+      delay: number;
+      duration: number;
+    }> = [
+      { id: "ds-1", parentId: null, name: "agent.run", kind: "span", startedAt: 0, durationMs: 0, delay: 0, duration: 4200 },
+      { id: "ds-2", parentId: "ds-1", name: "guard.pii_redact", kind: "guard", startedAt: 8, durationMs: 0, delay: 180, duration: 22, metadata: { redacted: "1 email" } },
+      { id: "ds-3", parentId: "ds-1", name: "retrieval.kb", kind: "retrieval", startedAt: 40, durationMs: 0, delay: 420, duration: 160, metadata: { hits: "3", collection: "shipping-faq" } },
+      { id: "ds-4", parentId: "ds-1", name: "openai.chat.completions", kind: "llm", startedAt: 220, durationMs: 0, delay: 900, duration: 2800, model: "gpt-4o-mini", inputTokens: 760, outputTokens: 240, costUsd: 0.00128, prompt: "You are a support agent for Waver… [demo trace]", completion: "Hi — your package is scheduled for delivery tomorrow by 6pm. I've flagged the route just in case." },
+      { id: "ds-5", parentId: "ds-1", name: "guard.tone_check", kind: "guard", startedAt: 3080, durationMs: 0, delay: 3600, duration: 160, metadata: { score: "4.6", threshold: "3.5" } },
+    ];
+
+    const initialTrace: Trace = {
+      id: tid,
+      projectId,
+      env: "prod",
+      promptName: "support.reply.v7",
+      promptVersion: "v7",
+      startedAt: Date.now(),
+      durationMs: 0,
+      totalTokens: 0,
+      totalCostUsd: 0,
+      status: "success",
+      input: "where's my package?",
+      output: "",
+      spans: [],
+    };
+
+    setLiveTraces((prev) => [initialTrace, ...prev]);
+    setRunningTraceId(tid);
+    setSelectedId(tid);
+    setSelectedSpanId(null);
+
+    // Progressively add each span
+    for (const s of SCRIPT) {
+      const t = setTimeout(() => {
+        setLiveTraces((prev) =>
+          prev.map((tr) => {
+            if (tr.id !== tid) return tr;
+            const newSpan: Span = {
+              id: s.id,
+              traceId: tid,
+              parentId: s.parentId,
+              name: s.name,
+              kind: s.kind,
+              startedAt: s.startedAt,
+              durationMs: s.duration,
+              status: "success",
+              model: s.model,
+              inputTokens: s.inputTokens,
+              outputTokens: s.outputTokens,
+              costUsd: s.costUsd,
+              prompt: s.prompt,
+              completion: s.completion,
+              metadata: s.metadata,
+            };
+            const nextSpans = [...tr.spans, newSpan];
+            // Update aggregate stats
+            const totalTokens =
+              (s.inputTokens ?? 0) + (s.outputTokens ?? 0) + tr.totalTokens;
+            const totalCostUsd = (s.costUsd ?? 0) + tr.totalCostUsd;
+            const currentEnd = s.startedAt + s.duration;
+            return {
+              ...tr,
+              spans: nextSpans,
+              totalTokens,
+              totalCostUsd,
+              durationMs: Math.max(tr.durationMs, currentEnd),
+            };
+          }),
+        );
+      }, s.delay);
+      demoTimers.current.push(t);
+    }
+
+    // Finalize
+    const finalize = setTimeout(() => {
+      setRunningTraceId(null);
+      setLiveTraces((prev) =>
+        prev.map((tr) =>
+          tr.id === tid ? { ...tr, durationMs: 4200 } : tr,
+        ),
+      );
+    }, 4400);
+    demoTimers.current.push(finalize);
+  }, [projectId]);
+
   return (
     <div className="flex flex-1 min-h-0">
       <div className="flex flex-1 flex-col min-w-0">
+        <div className="flex shrink-0 items-center justify-between border-b border-line bg-bg px-4 py-2.5">
+          <div className="flex items-center gap-2">
+            <span className="mono-small">
+              {traces.length} trace{traces.length === 1 ? "" : "s"}
+            </span>
+            {runningTraceId && (
+              <span className="flex items-center gap-1.5 rounded-full bg-[color:var(--accent)]/12 px-2 py-0.5 font-mono text-[10.5px] text-[color:var(--accent)]">
+                <span className="relative inline-flex h-1.5 w-1.5">
+                  <span className="absolute inset-0 rounded-full bg-[color:var(--accent)]" />
+                  <motion.span
+                    className="absolute inset-0 rounded-full bg-[color:var(--accent)]"
+                    animate={{ scale: [1, 2.4, 1], opacity: [0.6, 0, 0.6] }}
+                    transition={{ duration: 1.2, repeat: Infinity, ease: "easeOut" }}
+                  />
+                </span>
+                live
+              </span>
+            )}
+          </div>
+          <button
+            onClick={runDemo}
+            disabled={runningTraceId !== null}
+            className="group flex items-center gap-1.5 rounded-md bg-[color:var(--accent-strong)] px-2.5 py-1.5 text-[12px] font-medium text-ink hover:bg-[color:var(--accent)] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Play className="h-3 w-3 fill-current" strokeWidth={0} />
+            <span>Run demo trace</span>
+          </button>
+        </div>
         <TracesTable
           traces={traces}
           selectedId={selectedId}
+          liveId={runningTraceId}
           onSelect={(id) => {
             setSelectedId(id);
             setSelectedSpanId(null);
@@ -50,6 +180,7 @@ export function TracesView({ projectId }: { projectId: ProjectId }) {
           <TracePanel
             key={selected.id}
             trace={selected}
+            isLive={selected.id === runningTraceId}
             selectedSpanId={selectedSpanId}
             onSelectSpan={setSelectedSpanId}
             onClose={() => setSelectedId(null)}
@@ -65,10 +196,12 @@ export function TracesView({ projectId }: { projectId: ProjectId }) {
 function TracesTable({
   traces,
   selectedId,
+  liveId,
   onSelect,
 }: {
   traces: Trace[];
   selectedId: string | null;
+  liveId: string | null;
   onSelect: (id: string) => void;
 }) {
   return (
@@ -88,18 +221,37 @@ function TracesTable({
         <tbody>
           {traces.map((t) => {
             const isSelected = t.id === selectedId;
+            const isLive = t.id === liveId;
             return (
               <tr
                 key={t.id}
                 onClick={() => onSelect(t.id)}
                 className={[
                   "cursor-pointer transition-colors",
-                  isSelected ? "bg-accent-soft/40" : "hover:bg-surface",
+                  isSelected
+                    ? "bg-accent-soft/40"
+                    : isLive
+                      ? "bg-accent-soft/20"
+                      : "hover:bg-surface",
                 ].join(" ")}
               >
                 <Td>
-                  <div className="font-mono text-[11.5px] text-ink-2">
-                    {formatRelative(t.startedAt)}
+                  <div className="flex items-center gap-1.5">
+                    {isLive && (
+                      <span className="relative inline-flex h-1.5 w-1.5">
+                        <span className="absolute inset-0 rounded-full bg-[color:var(--accent)]" />
+                        <motion.span
+                          className="absolute inset-0 rounded-full bg-[color:var(--accent)]"
+                          animate={{ scale: [1, 2.4, 1], opacity: [0.6, 0, 0.6] }}
+                          transition={{ duration: 1.2, repeat: Infinity, ease: "easeOut" }}
+                        />
+                      </span>
+                    )}
+                    <div className="font-mono text-[11.5px] text-ink-2">
+                      {isLive
+                        ? "live"
+                        : formatRelative(t.startedAt, Date.now())}
+                    </div>
                   </div>
                 </Td>
                 <Td>
@@ -210,11 +362,13 @@ function StatusDot({ status }: { status: Trace["status"] }) {
 
 function TracePanel({
   trace,
+  isLive,
   selectedSpanId,
   onSelectSpan,
   onClose,
 }: {
   trace: Trace;
+  isLive: boolean;
   selectedSpanId: string | null;
   onSelectSpan: (id: string | null) => void;
   onClose: () => void;
@@ -239,7 +393,19 @@ function TracePanel({
             <span className="text-ink-4">·</span>
             <span>{formatRelative(trace.startedAt)}</span>
           </div>
-          <div className="mt-1 font-mono text-[13px] text-ink">{trace.id}</div>
+          <div className="mt-1 flex items-center gap-2">
+            <span className="font-mono text-[13px] text-ink">{trace.id}</span>
+            {isLive && (
+              <span className="flex items-center gap-1 rounded-full bg-[color:var(--accent)]/12 px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-[0.12em] text-[color:var(--accent)]">
+                <motion.span
+                  className="inline-block h-1 w-1 rounded-full bg-[color:var(--accent)]"
+                  animate={{ opacity: [0.4, 1, 0.4] }}
+                  transition={{ duration: 1, repeat: Infinity }}
+                />
+                streaming
+              </span>
+            )}
+          </div>
           <div className="mt-1 text-[12px] text-ink-2 truncate max-w-[400px]">
             {trace.input}
           </div>
