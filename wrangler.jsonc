@@ -4,6 +4,7 @@
   "main": "worker/index.ts",
   "compatibility_date": "2026-04-01",
   "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
   "routes": [
     { "pattern": "loupe.raymnz.com", "custom_domain": true }
   ],
